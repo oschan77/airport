@@ -15,7 +15,8 @@ import numpy as np
 import pyrealsense2 as rs
 import requests
 import torch
-import transformers
+
+# import transformers
 from flask import Flask, Response, jsonify, render_template
 from IPython.display import Image
 from PIL import Image
