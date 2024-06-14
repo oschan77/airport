@@ -19,8 +19,6 @@ import transformers
 from flask import Flask, Response, jsonify, render_template
 from IPython.display import Image
 from PIL import Image
-from sahi import AutoDetectionModel
-from sahi.predict import get_prediction, get_sliced_prediction, predict
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Annotator
 
@@ -160,14 +158,7 @@ def init_model():
     print(f"Resolution set to: {actual_width}x{actual_height}")
     print(f"FPS set to: {actual_fps}")
 
-    # od_model = YOLO("best.pt").to("cuda" if torch.cuda.is_available() else "cpu")
-
-    sahi_model = AutoDetectionModel.from_pretrained(
-        model_type="yolov8",
-        model_path="best.pt",
-        confidence_threshold=0.6,
-        device="cuda:0",
-    )
+    od_model = YOLO("best.pt").to("cuda" if torch.cuda.is_available() else "cpu")
 
     while True:
         # rs_frames = rs_pipeline.wait_for_frames()
@@ -185,18 +176,9 @@ def init_model():
 
         # color_img = np.asanyarray(color_frame.get_data())
 
-        # Sahi
-        sahi_preds = get_sliced_prediction(
-            color_img,
-            sahi_model,
-            slice_height=200,
-            slice_width=200,
-            overlap_height_ratio=0.2,
-            overlap_width_ratio=0.2,
-        )
-        sahi_results = sahi_preds.to_coco_predictions()
-
-        nPeople = len(sahi_results)
+        # OD
+        od_preds = od_model.predict(color_img, classes=[0], conf=0.6, device="cuda")
+        nPeople = len(od_preds[0].boxes)
         od_img = cv2.putText(
             color_img,
             f"Total Number of people: {nPeople}",
@@ -207,39 +189,10 @@ def init_model():
             2,
             cv2.LINE_AA,
         )
-
-        sahi_bboxes = list()
-        sahi_scores = list()
-        for result in sahi_results:
-            x = result["bbox"][0]
-            y = result["bbox"][1]
-            w = result["bbox"][2]
-            h = result["bbox"][3]
-            sahi_bboxes.append([x, y, x + w, y + h])
-            sahi_scores.append(result["score"])
-
-        print(f"sahi_bboxes: {sahi_bboxes}")
-        for i in range(len(sahi_bboxes)):
-            person = Person(sahi_bboxes[i])
-            od_img = person.draw_blue(od_img, sahi_scores[i])
-
-        # OD
-        # od_preds = od_model.predict(color_img, classes=[0], conf=0.6, device="cuda")
-        # nPeople = len(od_preds[0].boxes)
-        # od_img = cv2.putText(
-        #     color_img,
-        #     f"Total Number of people: {nPeople}",
-        #     (int(resolution[0] // 2 - 200), 50),
-        #     cv2.FONT_HERSHEY_SIMPLEX,
-        #     1,
-        #     (0, 255, 0),
-        #     2,
-        #     cv2.LINE_AA,
-        # )
-        # bboxes = od_preds[0].boxes.xyxy
-        # for bbox in bboxes:
-        #     person = Person(bbox)
-        #     od_img = person.draw(od_img)
+        bboxes = od_preds[0].boxes.xyxy
+        for bbox in bboxes:
+            person = Person(bbox)
+            od_img = person.draw(od_img)
 
         od_img = cv2.resize(od_img, (resolution[0], resolution[1]))
 
