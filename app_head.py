@@ -1,10 +1,10 @@
-from typing import List, Set
+from collections import namedtuple
+from typing import List, Set, Tuple
 
 import cv2
 import numpy as np
 import torch
 from flask import Flask, Response, jsonify, render_template
-from scipy.spatial.distance import pdist, squareform
 from ultralytics import YOLO
 
 app = Flask(__name__)
@@ -12,42 +12,55 @@ app = Flask(__name__)
 alarm = False
 
 
+BoundingBox = namedtuple("BoundingBox", ["x1", "y1", "x2", "y2"])
+
+
 class Head:
     def __init__(self, bbox: List[float], depth: float = None):
-        self.x1, self.y1, self.x2, self.y2 = map(int, bbox)
-        self.center = (int((self.x1 + self.x2) / 2), int((self.y1 + self.y2) / 2))
-        self.depth = depth
-
-    def draw(self, image: np.ndarray) -> np.ndarray:
-        image_with_bbox = cv2.rectangle(
-            image, (self.x1, self.y1), (self.x2, self.y2), (0, 255, 0), 2
+        self.bbox = BoundingBox(*map(int, bbox))
+        self.center = (
+            (self.bbox.x1 + self.bbox.x2) // 2,
+            (self.bbox.y1 + self.bbox.y2) // 2,
         )
+        self.depth = depth
+        self.area = self._calculate_area()
 
-        return image_with_bbox
+    def _calculate_area(self):
+        return (self.bbox.x2 - self.bbox.x1) * (self.bbox.y2 - self.bbox.y1)
+
+    def draw(
+        self,
+        image: np.ndarray,
+        color: Tuple[int, int, int] = (0, 255, 0),
+        thickness: int = 2,
+    ) -> np.ndarray:
+        return cv2.rectangle(
+            image,
+            (self.bbox.x1, self.bbox.y1),
+            (self.bbox.x2, self.bbox.y2),
+            color,
+            thickness,
+        )
 
     def draw_with_score(self, image: np.ndarray, score: float) -> np.ndarray:
-        image_with_score = cv2.putText(
+        image = cv2.putText(
             image,
-            str(score),
-            (self.x1, self.y1),
+            f"{score:.2f}",
+            (self.bbox.x1, self.bbox.y1 - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1,
+            0.5,
             (255, 0, 0),
             2,
-            cv2.LINE_AA,
         )
-
-        image_with_bbox = cv2.rectangle(
-            image_with_score, (self.x1, self.y1), (self.x2, self.y2), (0, 255, 0), 2
-        )
-
-        return image_with_bbox
+        return self.draw(image)
 
 
-from typing import List, Set
-
-import numpy as np
-from scipy.spatial.distance import pdist, squareform
+def calculate_head_pair_metrics(
+    head1: Head, head2: Head, image_width: int
+) -> Tuple[float, float]:
+    area_ratio = head1.area / head2.area
+    x_distance = abs(head1.center[0] - head2.center[0]) / image_width
+    return area_ratio, x_distance
 
 
 class HeadGroup:
@@ -55,113 +68,91 @@ class HeadGroup:
         self,
         bboxes: List[List[float]],
         image_width: int,
-        thres_x: float = 0.4,
-        area_ratio_min: float = 0.8,
-        area_ratio_max: float = 1.2,
+        base_thres_x: float = 0.1,
+        area_ratio_min: float = 0.6,
+        area_ratio_max: float = 1.4,
+        area_factor: float = 0.5,
     ):
-        self.bboxes = bboxes
+        self.heads = [Head(bbox) for bbox in bboxes]
         self.image_width = image_width
-        self.thres_x = thres_x
+        self.base_thres_x = base_thres_x
         self.area_ratio_min = area_ratio_min
         self.area_ratio_max = area_ratio_max
+        self.area_factor = area_factor
         self.groups = self._group_heads()
 
-    def _calculate_bbox_area(self, bbox):
-        return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+    def _calculate_dynamic_threshold(self, area1: float, area2: float) -> float:
+        avg_area = (area1 + area2) / 2
+        max_area = max(head.area for head in self.heads)
+        normalized_avg_area = 2 * (avg_area / max_area) - 1  # Range: -1 to +1
 
-    def _group_heads_by_distance(self, distances):
-        visited = set()
-        groups = []
-
-        for i in range(len(distances)):
-            if i in visited:
-                continue
-            group = set()
-            stack = [i]
-            while stack:
-                idx = stack.pop()
-
-                if idx not in visited:
-                    visited.add(idx)
-                    group.add(idx)
-
-                    for j in range(len(distances)):
-                        if distances[idx][j] < self.thres_x:
-                            stack.append(j)
-
-            groups.append(group)
-
-        return groups
-
-    def _group_heads_by_areas(self, potential_groups, areas):
-        visited = set()
-        groups = []
-        for group in potential_groups:
-            filtered_group = set()
-            for idx in group:
-                if idx not in visited:
-                    visited.add(idx)
-                    for j in group:
-                        if (
-                            idx != j
-                            and self.area_ratio_min
-                            <= areas[idx] / areas[j]
-                            <= self.area_ratio_max
-                        ):
-                            filtered_group.add(idx)
-                            filtered_group.add(j)
-
-            if filtered_group:
-                groups.append(filtered_group)
-
-        return groups
+        return (
+            self.base_thres_x
+            + self.base_thres_x * self.area_factor * normalized_avg_area
+        )
 
     def _group_heads(self) -> List[Set[int]]:
-        # Group by distances
-        centers = [
-            (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
-            for bbox in self.bboxes
-        ]
-        x_centers = [center[0] for center in centers]
-        x_centers_normalized = [x / self.image_width for x in x_centers]
-        distances = squareform(pdist(np.array(x_centers_normalized).reshape(-1, 1)))
-        groups = self._group_heads_by_distance(distances)
+        groups = []
+        visited = set()
 
-        # Group by areas
-        areas = [self._calculate_bbox_area(bbox) for bbox in self.bboxes]
-        groups = self._group_heads_by_areas(groups, areas)
+        for i, head1 in enumerate(self.heads):
+            if i in visited:
+                continue
+
+            group = {i}
+            stack = [i]
+
+            while stack:
+                idx = stack.pop()
+                if idx not in visited:
+                    visited.add(idx)
+                    for j, head2 in enumerate(self.heads):
+                        if idx != j and j not in visited:
+                            area_ratio, x_distance = calculate_head_pair_metrics(
+                                self.heads[idx], head2, self.image_width
+                            )
+                            dynamic_threshold = self._calculate_dynamic_threshold(
+                                self.heads[idx].area, head2.area
+                            )
+
+                            if (
+                                x_distance < dynamic_threshold
+                                and self.area_ratio_min
+                                <= area_ratio
+                                <= self.area_ratio_max
+                            ):
+                                group.add(j)
+                                stack.append(j)
+
+            if len(group) > 1:
+                groups.append(group)
 
         return groups
 
     def draw_bounding_boxes(self, image: np.ndarray) -> np.ndarray:
         for group in self.groups:
-            if len(group) > 1:  # Only draw for groups with more than one head
-                x_min = min(self.bboxes[i][0] for i in group)
-                y_min = min(self.bboxes[i][1] for i in group)
-                x_max = max(self.bboxes[i][2] for i in group)
-                y_max = max(self.bboxes[i][3] for i in group)
-                cv2.rectangle(
-                    image,
-                    (int(x_min), int(y_min)),
-                    (int(x_max), int(y_max)),
-                    (0, 0, 255),
-                    2,
-                )
-                cv2.putText(
-                    image,
-                    f"{len(group)}",
-                    (int(x_min), int(y_min) - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
+            group_heads = [self.heads[i] for i in group]
+            x_min = min(head.bbox.x1 for head in group_heads)
+            y_min = min(head.bbox.y1 for head in group_heads)
+            x_max = max(head.bbox.x2 for head in group_heads)
+            y_max = max(head.bbox.y2 for head in group_heads)
+
+            cv2.rectangle(image, (x_min, y_min), (x_max, y_max), (0, 0, 255), 2)
+            cv2.putText(
+                image,
+                f"{len(group)}",
+                (x_min, y_min - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+            )
+
         return image
 
 
 def setup_capture(resolution, fps):
-    cap = cv2.VideoCapture(2)
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Could not open webcam.")
         exit()
