@@ -5,8 +5,8 @@ if not cap.isOpened():
     print("Error: Could not open webcam.")
     exit()
 
-desired_width = 640
-desired_height = 480
+desired_width = 1920
+desired_height = 1080
 desired_fps = 60
 
 cap.set(cv2.CAP_PROP_FPS, desired_fps)
