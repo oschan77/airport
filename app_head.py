@@ -152,7 +152,14 @@ class HeadGroup:
 
 
 def setup_capture(resolution, fps):
-    cap = cv2.VideoCapture(2)
+    cam_idx = 0
+    for i in range(20):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            cam_idx = i
+            break
+        
+    cap = cv2.VideoCapture(cam_idx)
     if not cap.isOpened():
         print("Error: Could not open webcam.")
         exit()
