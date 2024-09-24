@@ -152,14 +152,7 @@ class HeadGroup:
 
 
 def setup_capture(resolution, fps):
-    cam_idx = 0
-    for i in range(20):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            cam_idx = i
-            break
-        
-    cap = cv2.VideoCapture(cam_idx)
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Could not open webcam.")
         exit()
@@ -218,7 +211,8 @@ def process_frame(od_model, color_img, resolution, actual_width):
 
 
 def init_model():
-    resolution = (960, 540)
+    frame_ratio = 0.6
+    resolution = (int(1920 * frame_ratio), int(1080 * frame_ratio))
     fps = 0
 
     cap, actual_width, actual_height = setup_capture(resolution, fps)
